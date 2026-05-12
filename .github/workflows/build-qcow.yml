@@ -8,7 +8,6 @@ on:
         required: true
         default: false
         type: boolean
-
       release_tag:
         description: "Release tag"
         required: false
@@ -19,13 +18,14 @@ permissions:
 
 jobs:
   build-qcow2:
-    name: build loong64 qcow2
+    name: build loong64 qcow2 full-system
     runs-on: ubuntu-24.04
 
     env:
-      ROOTFS_DIR: rootfs
-      RAW_IMAGE: debian-trixie-loong64.raw
+      ISO_URL: https://loong13.debian.net/debian-loong64-cd/13.4.0/loong64/iso-cd/debian-13.4.0-loong64-netinst.iso
+      ISO_FILE: debian-loong64-netinst.iso
       QCOW2_IMAGE: debian-trixie-loong64.qcow2
+      IMAGE_SIZE: 20G
 
     steps:
       - name: Checkout
@@ -42,253 +42,219 @@ jobs:
           echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
           echo "RELEASE=${RELEASE}" >> "$GITHUB_ENV"
 
+          echo "RELEASE_TAG=${RELEASE_TAG}"
+          echo "RELEASE=${RELEASE}"
+
       - name: Prepare host tools
         shell: bash
         run: |
           set -euo pipefail
 
           sudo apt-get update
-
           sudo apt-get install -y \
-            debootstrap \
-            qemu-user-static \
-            binfmt-support \
             qemu-system-misc \
             qemu-utils \
-            parted \
-            gdisk \
-            dosfstools \
-            e2fsprogs \
-            ovmf \
-            debian-ports-archive-keyring \
-            tar \
-            xz-utils \
-            rsync \
-            curl \
             wget \
+            curl \
+            xz-utils \
+            cpio \
+            gzip \
+            p7zip-full \
+            openssh-client \
+            sshpass \
+            rsync \
             jq \
             ca-certificates
 
-          update-binfmts --display || true
+          qemu-system-loongarch64 --version
 
-      - name: Bootstrap Debian 13 loong64 rootfs
+      - name: Download Debian loong64 netinst ISO
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo rm -rf "$ROOTFS_DIR"
+          wget -O "$ISO_FILE" "$ISO_URL"
 
-          sudo debootstrap \
-            --foreign \
-            --arch=loong64 \
-            --components=main,contrib,non-free,non-free-firmware \
-            trixie \
-            "$ROOTFS_DIR" \
-            http://loong13.debian.net/debian-loong64/
-
-          sudo cp /usr/bin/qemu-loongarch64-static \
-            "$ROOTFS_DIR/usr/bin/"
-
-          sudo chroot "$ROOTFS_DIR" \
-            /debootstrap/debootstrap --second-stage
-
-      - name: Configure rootfs
+      - name: Extract installer kernel and initrd
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo tee "$ROOTFS_DIR/etc/apt/sources.list" >/dev/null <<'EOF'
-          deb [trusted=yes] http://loong13.debian.net/debian-loong64/ trixie main contrib non-free non-free-firmware
-          deb [trusted=yes] http://loong13.debian.net/debian-loong64-security/ trixie-security main contrib non-free non-free-firmware
-          EOF
+          rm -rf iso boot initrd-work
+          mkdir -p iso boot initrd-work
 
-          sudo mount -t proc proc "$ROOTFS_DIR/proc"
-          sudo mount -t sysfs sys "$ROOTFS_DIR/sys"
-          sudo mount --bind /dev "$ROOTFS_DIR/dev"
-          sudo mount --bind /dev/pts "$ROOTFS_DIR/dev/pts"
+          7z x "$ISO_FILE" -oiso >/dev/null
 
-          sudo chroot "$ROOTFS_DIR" bash -lc '
-            set -euo pipefail
-
-            export DEBIAN_FRONTEND=noninteractive
-
-            apt-get update
-
-            apt-get install -y \
-              sudo \
-              git \
-              rsync \
-              findutils \
-              tar \
-              gzip \
-              unzip \
-              which \
-              curl \
-              jq \
-              wget \
-              file \
-              ca-certificates \
-              desktop-file-utils \
-              xdg-utils \
-              fakeroot \
-              dpkg-dev \
-              gcc \
-              make \
-              pkg-config \
-              libc6-dev \
-              libgcc-s1 \
-              libstdc++6 \
-              zlib1g \
-              libicu-dev \
-              libssl-dev \
-              libfontconfig1 \
-              libfreetype6 \
-              openssh-server \
-              systemd-sysv \
-              linux-image-loong64 \
-              grub-efi-loong64
-
-            echo "root:root" | chpasswd
-
-            systemctl enable ssh || true
-
-            apt-get clean
-
-            rm -rf /var/lib/apt/lists/*
-          '
-
-          sudo umount -lf "$ROOTFS_DIR/dev/pts" || true
-          sudo umount -lf "$ROOTFS_DIR/dev" || true
-          sudo umount -lf "$ROOTFS_DIR/sys" || true
-          sudo umount -lf "$ROOTFS_DIR/proc" || true
-
-      - name: Create raw disk
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          qemu-img create -f raw "$RAW_IMAGE" 20G
-
-          LOOP="$(sudo losetup --find --show -P "$RAW_IMAGE")"
-
-          echo "LOOP=$LOOP" >> "$GITHUB_ENV"
-
-          sudo parted -s "$LOOP" mklabel gpt
-
-          sudo parted -s "$LOOP" \
-            mkpart ESP fat32 1MiB 513MiB
-
-          sudo parted -s "$LOOP" set 1 esp on
-
-          sudo parted -s "$LOOP" \
-            mkpart primary ext4 513MiB 100%
-
-          sudo partprobe "$LOOP"
-
-          sleep 2
-
-      - name: Format partitions
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          EFI_PART="${LOOP}p1"
-          ROOT_PART="${LOOP}p2"
-
-          echo "EFI_PART=$EFI_PART" >> "$GITHUB_ENV"
-          echo "ROOT_PART=$ROOT_PART" >> "$GITHUB_ENV"
-
-          sudo mkfs.vfat -F32 "$EFI_PART"
-          sudo mkfs.ext4 -F "$ROOT_PART"
-
-      - name: Populate filesystem
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          sudo mkdir -p /mnt/loongroot
-
-          sudo mount "$ROOT_PART" /mnt/loongroot
-
-          sudo mkdir -p /mnt/loongroot/boot/efi
-
-          sudo mount "$EFI_PART" \
-            /mnt/loongroot/boot/efi
-
-          sudo rsync -aHAX \
-            "$ROOTFS_DIR"/ \
-            /mnt/loongroot/
-
-      - name: Configure fstab
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          ROOT_UUID="$(
-            sudo blkid -s UUID -o value "$ROOT_PART"
+          KERNEL="$(
+            find iso -type f \( -name 'vmlinux' -o -name 'linux' -o -name 'vmlinuz' \) \
+              -exec sh -c 'file "$1" | grep -q ELF && echo "$1"' sh {} \; \
+              | head -n1
           )"
 
-          EFI_UUID="$(
-            sudo blkid -s UUID -o value "$EFI_PART"
+          INITRD="$(
+            find iso -type f \( -name 'initrd.gz' -o -name 'initrd' \) \
+              | head -n1
           )"
 
-          sudo tee /mnt/loongroot/etc/fstab >/dev/null <<EOF
-          UUID=${ROOT_UUID} / ext4 defaults 0 1
-          UUID=${EFI_UUID} /boot/efi vfat umask=0077 0 1
+          [[ -n "$KERNEL" ]] || { echo "No ELF installer kernel found"; find iso -type f | sort | head -200; exit 1; }
+          [[ -n "$INITRD" ]] || { echo "No installer initrd found"; find iso -type f | sort | head -200; exit 1; }
+
+          cp "$KERNEL" boot/vmlinux
+          cp "$INITRD" boot/initrd.gz
+
+          file boot/vmlinux
+          ls -lh boot/initrd.gz
+
+      - name: Create preseed file
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cat > preseed.cfg <<'EOF'
+          d-i debian-installer/locale string en_US.UTF-8
+          d-i keyboard-configuration/xkb-keymap select us
+          d-i netcfg/choose_interface select auto
+          d-i netcfg/get_hostname string loong64-builder
+          d-i netcfg/get_domain string local
+
+          d-i mirror/country string manual
+          d-i mirror/http/hostname string loong13.debian.net
+          d-i mirror/http/directory string /debian-loong64
+          d-i mirror/http/proxy string
+
+          d-i passwd/root-login boolean true
+          d-i passwd/make-user boolean false
+          d-i passwd/root-password password root
+          d-i passwd/root-password-again password root
+
+          d-i clock-setup/utc boolean true
+          d-i time/zone string UTC
+
+          d-i partman-auto/disk string /dev/vda
+          d-i partman-auto/method string regular
+          d-i partman-auto/choose_recipe select atomic
+          d-i partman-partitioning/confirm_write_new_label boolean true
+          d-i partman/choose_partition select finish
+          d-i partman/confirm boolean true
+          d-i partman/confirm_nooverwrite boolean true
+
+          d-i apt-setup/non-free-firmware boolean true
+
+          tasksel tasksel/first multiselect standard, ssh-server
+
+          d-i pkgsel/include string openssh-server sudo git rsync findutils tar gzip unzip which curl jq wget file ca-certificates desktop-file-utils xdg-utils fakeroot dpkg-dev gcc make pkg-config libc6-dev libgcc-s1 libstdc++6 zlib1g libicu-dev libssl-dev libfontconfig1 libfreetype6
+
+          popularity-contest popularity-contest/participate boolean false
+
+          d-i grub-installer/only_debian boolean true
+          d-i grub-installer/bootdev string /dev/vda
+
+          d-i finish-install/reboot_in_progress note
+
+          d-i preseed/late_command string \
+            in-target sh -c 'echo "deb [trusted=yes] http://loong13.debian.net/debian-loong64/ trixie main contrib non-free non-free-firmware" > /etc/apt/sources.list'; \
+            in-target sh -c 'echo "deb [trusted=yes] http://loong13.debian.net/debian-loong64-security/ trixie-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list'; \
+            in-target sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; \
+            in-target sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; \
+            in-target systemctl enable ssh; \
+            in-target apt-get clean
           EOF
 
-      - name: Install GRUB EFI
+      - name: Inject preseed into initrd
         shell: bash
         run: |
           set -euo pipefail
 
-          sudo mount -t proc proc /mnt/loongroot/proc
-          sudo mount -t sysfs sys /mnt/loongroot/sys
-          sudo mount --bind /dev /mnt/loongroot/dev
-          sudo mount --bind /dev/pts /mnt/loongroot/dev/pts
+          rm -rf initrd-work
+          mkdir -p initrd-work
 
-          sudo chroot /mnt/loongroot bash -lc '
-            set -euo pipefail
+          cd initrd-work
 
-            grub-install \
-              --target=loongarch64-efi \
-              --efi-directory=/boot/efi \
-              --bootloader-id=debian \
-              --removable
+          gzip -dc ../boot/initrd.gz | cpio -id --no-absolute-filenames
 
-            update-grub
-          '
+          cp ../preseed.cfg preseed.cfg
 
-          sudo umount -lf /mnt/loongroot/dev/pts || true
-          sudo umount -lf /mnt/loongroot/dev || true
-          sudo umount -lf /mnt/loongroot/sys || true
-          sudo umount -lf /mnt/loongroot/proc || true
+          find . | cpio -H newc -o | gzip -9 > ../boot/initrd-preseed.gz
 
-      - name: Cleanup mounts
-        if: always()
-        shell: bash
-        run: |
-          sudo umount -lf /mnt/loongroot/boot/efi || true
-          sudo umount -lf /mnt/loongroot || true
+          cd ..
 
-      - name: Detach loop
-        if: always()
-        shell: bash
-        run: |
-          sudo losetup -d "$LOOP" || true
+          ls -lh boot/initrd-preseed.gz
 
-      - name: Convert qcow2
+      - name: Create qcow2 disk
         shell: bash
         run: |
           set -euo pipefail
 
-          qemu-img convert \
-            -f raw \
-            -O qcow2 \
-            "$RAW_IMAGE" \
-            "$QCOW2_IMAGE"
+          qemu-img create -f qcow2 "$QCOW2_IMAGE" "$IMAGE_SIZE"
 
           qemu-img info "$QCOW2_IMAGE"
+
+      - name: Install Debian loong64 in full-system QEMU
+        shell: bash
+        timeout-minutes: 180
+        run: |
+          set -euo pipefail
+
+          set +e
+
+          qemu-system-loongarch64 \
+            -machine virt \
+            -cpu la464 \
+            -m 8192 \
+            -smp 4 \
+            -kernel boot/vmlinux \
+            -initrd boot/initrd-preseed.gz \
+            -append "console=ttyS0 auto=true priority=critical preseed/file=/preseed.cfg" \
+            -drive file="$QCOW2_IMAGE",if=virtio,format=qcow2 \
+            -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+            -device virtio-net-pci,netdev=net0 \
+            -nographic 2>&1 | tee qemu-install.log
+
+          QEMU_EXIT="${PIPESTATUS[0]}"
+
+          set -e
+
+          echo "QEMU installer exited: $QEMU_EXIT"
+
+      - name: Boot installed qcow2 and verify SSH
+        shell: bash
+        timeout-minutes: 30
+        run: |
+          set -euo pipefail
+
+          qemu-system-loongarch64 \
+            -machine virt \
+            -cpu la464 \
+            -m 8192 \
+            -smp 4 \
+            -drive file="$QCOW2_IMAGE",if=virtio,format=qcow2 \
+            -netdev user,id=net0,hostfwd=tcp::2222-:22 \
+            -device virtio-net-pci,netdev=net0 \
+            -nographic \
+            > qemu-boot.log 2>&1 &
+
+          QEMU_PID="$!"
+          echo "$QEMU_PID" > qemu.pid
+
+          for i in {1..180}; do
+            if sshpass -p root ssh \
+              -o StrictHostKeyChecking=no \
+              -o UserKnownHostsFile=/dev/null \
+              -p 2222 root@127.0.0.1 \
+              'uname -m && cat /etc/debian_version'; then
+              echo "VM ready"
+              kill "$QEMU_PID" 2>/dev/null || true
+              exit 0
+            fi
+
+            echo "Waiting for SSH..."
+            sleep 5
+          done
+
+          echo "VM SSH not ready"
+          tail -200 qemu-boot.log || true
+          kill "$QEMU_PID" 2>/dev/null || true
+          exit 1
 
       - name: Compress qcow2
         shell: bash
@@ -305,10 +271,8 @@ jobs:
           tag_name: ${{ env.RELEASE_TAG }}
           name: ${{ env.RELEASE_TAG }}
           prerelease: ${{ env.RELEASE != 'true' }}
-
           files: |
             ${{ env.QCOW2_IMAGE }}.xz
             SHA256SUMS
-
         env:
           GITHUB_TOKEN: ${{ github.token }}
