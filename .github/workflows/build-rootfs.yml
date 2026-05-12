@@ -22,7 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
-      ROOTFS_NAME: debian-trixie-loong64-v2rayn-builder-rootfs.tar.xz
+      ROOTFS_NAME: debian-trixie-loong64-rootfs.tar.xz
       ROOTFS_DIR: rootfs
 
     steps:
