@@ -22,6 +22,7 @@ jobs:
     runs-on: ubuntu-24.04
 
     env:
+      ISO_URL: https://loong13.debian.net/debian-loong64-cd/13.4.0/loong64/iso-cd/debian-13.4.0-loong64-netinst.iso
       ISO_FILE: debian-loong64-netinst.iso
       QCOW2_IMAGE: debian-trixie-loong64.qcow2
       IMAGE_SIZE: 20G
@@ -72,42 +73,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          URLS=(
-            "https://mirrors.opensrc.us.ci/debian-loong64-cd/13.4.0/loong64/iso-cd/debian-13.4.0-loong64-netinst.iso"
-            "https://loong13.debian.net/debian-loong64-cd/13.4.0/loong64/iso-cd/debian-13.4.0-loong64-netinst.iso"
-          )
-
-          success=0
-
-          for url in "${URLS[@]}"; do
-            echo "Try ISO mirror:"
-            echo "  $url"
-
-            for i in {1..5}; do
-              echo "Attempt $i"
-
-              if wget \
-                -4 \
-                -c \
-                --timeout=60 \
-                --tries=3 \
-                --waitretry=10 \
-                -O "$ISO_FILE" \
-                "$url"; then
-                success=1
-                break 2
-              fi
-
-              sleep 15
-            done
-          done
-
-          [[ "$success" -eq 1 ]] || {
-            echo "All ISO mirrors failed"
-            exit 1
-          }
-
-          ls -lh "$ISO_FILE"
+          wget -O "$ISO_FILE" "$ISO_URL"
 
       - name: Extract installer kernel and initrd
         shell: bash
@@ -152,8 +118,8 @@ jobs:
           d-i netcfg/get_domain string local
 
           d-i mirror/country string manual
-          d-i mirror/http/hostname string mirrors.opensrc.us.ci
-          d-i mirror/http/directory string /debian
+          d-i mirror/http/hostname string loong13.debian.net
+          d-i mirror/http/directory string /debian-loong64
           d-i mirror/http/proxy string
 
           d-i passwd/root-login boolean true
@@ -186,8 +152,8 @@ jobs:
           d-i finish-install/reboot_in_progress note
 
           d-i preseed/late_command string \
-            in-target sh -c 'echo "deb [trusted=yes] https://mirrors.opensrc.us.ci/debian trixie main contrib non-free non-free-firmware" > /etc/apt/sources.list'; \
-            in-target sh -c 'echo "deb [trusted=yes] https://mirrors.opensrc.us.ci/debian-security trixie-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list'; \
+            in-target sh -c 'echo "deb [trusted=yes] http://loong13.debian.net/debian-loong64/ trixie main contrib non-free non-free-firmware" > /etc/apt/sources.list'; \
+            in-target sh -c 'echo "deb [trusted=yes] http://loong13.debian.net/debian-loong64-security/ trixie-security main contrib non-free non-free-firmware" >> /etc/apt/sources.list'; \
             in-target sed -i 's/^#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; \
             in-target sed -i 's/^#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; \
             in-target systemctl enable ssh; \
