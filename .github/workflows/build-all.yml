@@ -1,0 +1,66 @@
+name: build all Debian 13 loong64 images
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release"
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: "Release tag"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  dispatch:
+    name: dispatch rootfs and qcow2 builds
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Dispatch build-rootfs.yml
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/build-rootfs.yml/dispatches" \
+            -d "{
+              \"ref\": \"${GITHUB_REF_NAME}\",
+              \"inputs\": {
+                \"release\": \"${RELEASE}\",
+                \"release_tag\": \"${RELEASE_TAG}\"
+              }
+            }"
+
+      - name: Dispatch build-qcow.yml
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RELEASE: ${{ inputs.release }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          curl -fsSL -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/actions/workflows/build-qcow.yml/dispatches" \
+            -d "{
+              \"ref\": \"${GITHUB_REF_NAME}\",
+              \"inputs\": {
+                \"release\": \"${RELEASE}\",
+                \"release_tag\": \"${RELEASE_TAG}\"
+              }
+            }"
