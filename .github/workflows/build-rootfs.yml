@@ -1,0 +1,151 @@
+name: build Debian 13 loong64 rootfs
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: "Release"
+        required: true
+        default: false
+        type: boolean
+      release_tag:
+        description: "Release tag"
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build-rootfs:
+    name: build loong64 rootfs
+    runs-on: ubuntu-24.04
+
+    env:
+      ROOTFS_NAME: debian-trixie-loong64-v2rayn-builder-rootfs.tar.xz
+      ROOTFS_DIR: rootfs
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6.0.2
+
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG="${{ inputs.release_tag }}"
+          RELEASE="${{ inputs.release }}"
+
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> "$GITHUB_ENV"
+          echo "RELEASE=${RELEASE}" >> "$GITHUB_ENV"
+
+          echo "RELEASE_TAG=${RELEASE_TAG}"
+          echo "RELEASE=${RELEASE}"
+
+      - name: Prepare host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+          sudo apt-get install -y \
+            debootstrap \
+            qemu-user-static \
+            binfmt-support \
+            debian-ports-archive-keyring \
+            tar \
+            xz-utils \
+            rsync \
+            curl \
+            ca-certificates
+
+          update-binfmts --display || true
+
+      - name: Bootstrap Debian 13 loong64 rootfs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo rm -rf "$ROOTFS_DIR"
+
+          sudo debootstrap \
+            --foreign \
+            --arch=loong64 \
+            --components=main,contrib,non-free,non-free-firmware \
+            trixie \
+            "$ROOTFS_DIR" \
+            http://loong13.debian.net/debian-loong64/
+
+          sudo cp /usr/bin/qemu-loongarch64-static "$ROOTFS_DIR/usr/bin/"
+
+          sudo chroot "$ROOTFS_DIR" /debootstrap/debootstrap --second-stage
+
+      - name: Configure Debian 13 loong64 rootfs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo tee "$ROOTFS_DIR/etc/apt/sources.list" >/dev/null <<'EOF'
+          deb [trusted=yes] http://loong13.debian.net/debian-loong64/ trixie main contrib non-free non-free-firmware
+          deb [trusted=yes] http://loong13.debian.net/debian-loong64-security/ trixie-security main contrib non-free non-free-firmware
+          EOF
+
+          sudo mount -t proc proc "$ROOTFS_DIR/proc"
+          sudo mount -t sysfs sys "$ROOTFS_DIR/sys"
+          sudo mount --bind /dev "$ROOTFS_DIR/dev"
+          sudo mount --bind /dev/pts "$ROOTFS_DIR/dev/pts"
+
+          sudo chroot "$ROOTFS_DIR" bash -lc '
+            set -euo pipefail
+            export DEBIAN_FRONTEND=noninteractive
+
+            apt-get update
+
+            apt-get install -y \
+              sudo git rsync findutils tar gzip unzip which curl jq wget file \
+              ca-certificates desktop-file-utils xdg-utils fakeroot dpkg-dev \
+              gcc make pkg-config libc6-dev libgcc-s1 libstdc++6 zlib1g \
+              libicu-dev libssl-dev libfontconfig1 libfreetype6 \
+              openssh-server
+
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+          '
+
+          sudo umount -lf "$ROOTFS_DIR/dev/pts" || true
+          sudo umount -lf "$ROOTFS_DIR/dev" || true
+          sudo umount -lf "$ROOTFS_DIR/sys" || true
+          sudo umount -lf "$ROOTFS_DIR/proc" || true
+
+      - name: Verify loong64 rootfs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo chroot "$ROOTFS_DIR" bash -lc '
+            uname -m || true
+            dpkg --print-architecture
+            cat /etc/debian_version
+            file /bin/bash
+          '
+
+      - name: Compress rootfs
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo tar --numeric-owner -C "$ROOTFS_DIR" -cJf "$ROOTFS_NAME" .
+          sha256sum "$ROOTFS_NAME" > SHA256SUMS
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
+          prerelease: ${{ env.RELEASE != 'true' }}
+          files: |
+            ${{ env.ROOTFS_NAME }}
+            SHA256SUMS
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
