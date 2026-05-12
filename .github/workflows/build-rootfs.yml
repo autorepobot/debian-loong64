@@ -69,13 +69,40 @@ jobs:
 
           sudo rm -rf "$ROOTFS_DIR"
 
-          sudo debootstrap \
-            --foreign \
-            --arch=loong64 \
-            --components=main,contrib,non-free,non-free-firmware \
-            trixie \
-            "$ROOTFS_DIR" \
-            http://loong13.debian.net/debian-loong64/
+          MIRRORS=(
+            "https://mirrors.opensrc.us.ci/debian"
+            "http://loong13.debian.net/debian-loong64"
+          )
+
+          success=0
+
+          for mirror in "${MIRRORS[@]}"; do
+            echo "Try bootstrap mirror:"
+            echo "  $mirror"
+
+            for i in {1..5}; do
+              echo "Attempt $i"
+
+              if sudo debootstrap \
+                --foreign \
+                --arch=loong64 \
+                --components=main,contrib,non-free,non-free-firmware \
+                trixie \
+                "$ROOTFS_DIR" \
+                "$mirror"; then
+                success=1
+                break 2
+              fi
+
+              sudo rm -rf "$ROOTFS_DIR"
+              sleep 15
+            done
+          done
+
+          [[ "$success" -eq 1 ]] || {
+            echo "All bootstrap mirrors failed"
+            exit 1
+          }
 
           sudo cp /usr/bin/qemu-loongarch64-static "$ROOTFS_DIR/usr/bin/"
 
@@ -87,8 +114,8 @@ jobs:
           set -euo pipefail
 
           sudo tee "$ROOTFS_DIR/etc/apt/sources.list" >/dev/null <<'EOF'
-          deb [trusted=yes] http://loong13.debian.net/debian-loong64/ trixie main contrib non-free non-free-firmware
-          deb [trusted=yes] http://loong13.debian.net/debian-loong64-security/ trixie-security main contrib non-free non-free-firmware
+          deb [trusted=yes] https://mirrors.opensrc.us.ci/debian trixie main contrib non-free non-free-firmware
+          deb [trusted=yes] https://mirrors.opensrc.us.ci/debian-security trixie-security main contrib non-free non-free-firmware
           EOF
 
           sudo mount -t proc proc "$ROOTFS_DIR/proc"
@@ -100,7 +127,13 @@ jobs:
             set -euo pipefail
             export DEBIAN_FRONTEND=noninteractive
 
-            apt-get update
+            apt-get update || {
+              cat > /etc/apt/sources.list <<EOF
+          deb [trusted=yes] http://loong13.debian.net/debian-loong64/ trixie main contrib non-free non-free-firmware
+          deb [trusted=yes] http://loong13.debian.net/debian-loong64-security/ trixie-security main contrib non-free non-free-firmware
+          EOF
+              apt-get update
+            }
 
             apt-get install -y \
               sudo git rsync findutils tar gzip unzip which curl jq wget file \
